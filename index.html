@@ -12,7 +12,6 @@
             padding: 10px;
             background-color: #f0f4f8;
             color: #333;
-            /* スマートフォンでのスクロールバウンス防止 */
             overscroll-behavior-y: none;
         }
         h2 { font-size: 1.2rem; margin-bottom: 5px; }
@@ -21,10 +20,9 @@
             position: relative;
             display: block;
             margin: 10px auto;
-            /* 画面幅に合わせて正方形のコンテナを作る */
             width: 100%;
-            max-width: 600px; /* PCなどで大きくなりすぎないように制限 */
-            aspect-ratio: 1 / 1; /* 常に正方形を維持 */
+            max-width: 600px; 
+            aspect-ratio: 1 / 1; 
             background-color: #000;
             overflow: hidden;
             border-radius: 8px;
@@ -34,21 +32,19 @@
             display: block;
             width: 100%;
             height: 100%;
-            /* 正方形の枠からはみ出た部分をトリミングして中央寄せで表示 */
             object-fit: cover; 
+            z-index: 1;
         }
-        /* カメラ起動時はビデオの上に被せる */
         canvas.overlay {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            /* キャンバス自体の表示もコンテナに合わせて伸縮 */
             object-fit: contain; 
             -webkit-tap-highlight-color: transparent;
+            z-index: 5;
         }
-        /* 撮影後は通常のブロック要素に戻す */
         canvas.static {
             position: relative;
             display: block;
@@ -56,6 +52,45 @@
             height: 100%;
             object-fit: contain;
             -webkit-tap-highlight-color: transparent;
+        }
+
+        /* --- AI林冠から移植した水準器UI --- */
+        .level-overlay {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 200px; height: 200px;
+            border-radius: 50%;
+            border: 2px dashed rgba(255, 255, 255, 0.5);
+            z-index: 10;
+            pointer-events: none;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .crosshair { position: absolute; width: 100%; height: 100%; }
+        .crosshair::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: rgba(255,255,255,0.5); }
+        .crosshair::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.5); }
+        
+        .target-circle {
+            width: 60px; height: 60px;
+            border: 3px solid rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            z-index: 11;
+            transition: all 0.2s;
+        }
+        .target-circle.ok {
+            border-color: #2ecc71;
+            background-color: rgba(46, 204, 113, 0.3);
+            box-shadow: 0 0 15px #2ecc71;
+        }
+        .bubble {
+            position: absolute;
+            width: 30px; height: 30px;
+            background-color: #e74c3c;
+            border-radius: 50%;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 12;
+            transition: transform 0.1s linear;
         }
         
         .controls { margin-bottom: 5px; }
@@ -79,7 +114,7 @@
             transform: none;
         }
         .action-btn { background-color: #e53e3e; font-weight: bold; }
-        .gps-btn { background-color: #d69e2e; }
+        .gps-btn { background-color: #3498db; }
         
         #status-msg {
             font-weight: bold;
@@ -113,7 +148,7 @@
 </head>
 <body>
 
-    <h2>樹頂密度 v0.3</h2>
+    <h2>樹頂密度 v0.4</h2>
     
     <div class="controls">
         <button id="cameraBtn">📷 カメラ＆センサー起動</button>
@@ -131,6 +166,12 @@
     <div id="media-container">
         <video id="cameraVideo" autoplay playsinline muted></video>
         <canvas id="mainCanvas" class="overlay"></canvas>
+        
+        <div class="level-overlay" id="levelOverlay" style="display: none;">
+            <div class="crosshair"></div>
+            <div class="target-circle" id="targetCircle"></div>
+            <div class="bubble" id="bubble"></div>
+        </div>
     </div>
 
     <div class="result-box">
@@ -142,6 +183,10 @@
         const video = document.getElementById('cameraVideo');
         const canvas = document.getElementById('mainCanvas');
         const ctx = canvas.getContext('2d');
+        
+        const levelOverlay = document.getElementById('levelOverlay');
+        const targetCircle = document.getElementById('targetCircle');
+        const bubble = document.getElementById('bubble');
         
         const cameraBtn = document.getElementById('cameraBtn');
         const captureBtn = document.getElementById('captureBtn');
@@ -157,15 +202,11 @@
         let stream = null;
         let animationId = null;
         
-        let tiltX = 0; 
-        let tiltY = 0; 
-        
         let centerX = 0;
         let centerY = 0;
         let radius = null; 
         let markers = [];  
 
-        // 正方形クリップ用の情報
         let squareSize = 0;
         let cropX = 0;
         let cropY = 0;
@@ -173,13 +214,37 @@
         const bufferCanvas = document.createElement('canvas');
         const bufferCtx = bufferCanvas.getContext('2d');
 
-        // センサーの値を取得する関数
-        function handleOrientation(e) {
-            tiltX = e.gamma || 0; 
-            tiltY = e.beta || 0;  
+        // AI林冠から移植したセンサー処理
+        function handleOrientation(event) {
+            if (appState !== 'CAMERA') return;
+
+            let x = event.gamma || 0; // 左右
+            let y = event.beta || 0;  // 前後
+
+            if (Math.abs(y) > 90) {
+                if (y > 0) { y = 180 - y; } else { y = -180 - y; }
+            }
+            
+            let moveX = x * 1.5;
+            let moveY = y * 1.5;
+
+            const maxDist = 80;
+            const dist = Math.sqrt(moveX*moveX + moveY*moveY);
+            if (dist > maxDist) {
+                moveX = (moveX / dist) * maxDist;
+                moveY = (moveY / dist) * maxDist;
+            }
+
+            bubble.style.transform = `translate(calc(-50% + ${moveX}px), calc(-50% + ${moveY}px))`;
+
+            const threshold = 10;
+            if (Math.abs(x) < threshold && Math.abs(y) < threshold) {
+                targetCircle.classList.add('ok');
+            } else {
+                targetCircle.classList.remove('ok');
+            }
         }
 
-        // GPS取得処理
         gpsBtn.addEventListener('click', function() {
             if (!navigator.geolocation) {
                 gpsDisplay.textContent = "この端末はGPSに対応していません";
@@ -207,7 +272,6 @@
         });
 
         cameraBtn.addEventListener('click', async function() {
-            // iOS向けのセンサー許可リクエスト
             if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
                 try {
                     const permissionState = await DeviceOrientationEvent.requestPermission();
@@ -220,7 +284,6 @@
                     console.error(error);
                 }
             } else {
-                // Android等、明示的な許可が不要な場合
                 window.addEventListener('deviceorientation', handleOrientation);
             }
 
@@ -228,7 +291,6 @@
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: {
                         facingMode: 'environment',
-                        // 可能であれば高解像度を要求
                         width: { ideal: 1920 },
                         height: { ideal: 1920 }
                     }
@@ -238,13 +300,10 @@
                 video.onloadedmetadata = () => {
                     const vw = video.videoWidth;
                     const vh = video.videoHeight;
-                    // 短い方の辺に合わせて正方形のサイズを決定
                     squareSize = Math.min(vw, vh);
-                    // 中央を切り抜くための開始座標を計算
                     cropX = (vw - squareSize) / 2;
                     cropY = (vh - squareSize) / 2;
 
-                    // キャンバスの内部解像度を正方形に設定
                     canvas.width = squareSize;
                     canvas.height = squareSize;
                     bufferCanvas.width = squareSize;
@@ -253,8 +312,9 @@
                     centerX = squareSize / 2;
                     centerY = squareSize / 2;
                     
-                    canvas.className = 'overlay'; // 重ねるモード
+                    canvas.className = 'overlay'; 
                     video.style.display = 'block';
+                    levelOverlay.style.display = 'flex'; // 水準器を表示
                     
                     appState = 'CAMERA';
                     cameraBtn.style.display = 'none';
@@ -273,12 +333,10 @@
         captureBtn.addEventListener('click', function() {
             if (appState !== 'CAMERA') return;
             
-            // ビデオフレームの中央部分を正方形に切り抜いて裏キャンバスに描画
-            // drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
             bufferCtx.drawImage(
                 video, 
-                cropX, cropY, squareSize, squareSize, // ソースの切り抜き範囲
-                0, 0, squareSize, squareSize          // 描画先の範囲
+                cropX, cropY, squareSize, squareSize,
+                0, 0, squareSize, squareSize
             );
             
             if (stream) {
@@ -286,22 +344,21 @@
             }
             
             video.style.display = 'none'; 
-            canvas.className = 'static'; // キャンバスをブロック要素にする
+            levelOverlay.style.display = 'none'; // 撮影後は水準器を隠す
+            canvas.className = 'static'; 
             
             appState = 'SET_RADIUS';
             captureBtn.style.display = 'none';
-            statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
+            statusMsg.textContent = "2. 画面上部の赤線上で基準木をタップ";
             statusMsg.style.color = "#2b6cb0";
         });
 
         canvas.addEventListener('pointerdown', function(e) {
             if (appState === 'INIT' || appState === 'CAMERA') return;
 
-            // 画面上の表示サイズとキャンバスの内部解像度の比率を計算
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
-            // タップ座標を内部解像度の座標系に変換
             const x = (e.clientX - rect.left) * scaleX;
             const y = (e.clientY - rect.top) * scaleY;
 
@@ -326,7 +383,7 @@
             } else if (radius !== null) {
                 radius = null;
                 appState = 'SET_RADIUS';
-                statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
+                statusMsg.textContent = "2. 画面上部の赤線上で基準木をタップ";
                 statusMsg.style.color = "#2b6cb0";
             }
             if (radius === null) {
@@ -336,7 +393,7 @@
         });
 
         resetBtn.addEventListener('click', function() {
-            location.reload(); // 一番確実なリセット（画面再読み込み）
+            location.reload(); 
         });
 
         function updateResults() {
@@ -346,34 +403,32 @@
         }
 
         function drawLoop() {
-            // 描画エリアをクリア
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const scaleFactor = canvas.width / 600;
 
             if (appState === 'CAMERA') {
-                drawGuideLines();
-                drawLevel();
+                drawGuideLines(scaleFactor);
             } else {
-                // 撮影した正方形画像を背景に描画
                 ctx.drawImage(bufferCanvas, 0, 0);
                 
                 if (radius === null) {
-                    drawGuideLines(); 
+                    drawGuideLines(scaleFactor); 
                 } else {
-                    // 仮想円の描画
+                    // ★仮想円：緑色の太線
                     ctx.beginPath();
                     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-                    ctx.strokeStyle = "rgba(0, 255, 255, 0.8)";
-                    ctx.lineWidth = 3 / (canvas.width / 600); // 解像度に応じて線の太さを調整
+                    ctx.strokeStyle = "rgba(46, 204, 113, 0.9)"; // AI林冠のOK時の緑
+                    ctx.lineWidth = 5 * scaleFactor; 
                     ctx.stroke();
                     ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
                     ctx.fill();
                 }
 
-                // マーカーの描画
-                const markerRadius = 8 / (canvas.width / 600); // 解像度に応じてマーカーサイズを調整
+                // ★マーカー：赤色で大きく
+                const markerRadius = 14 * scaleFactor; 
                 ctx.fillStyle = "red";
                 ctx.strokeStyle = "white";
-                ctx.lineWidth = 2 / (canvas.width / 600);
+                ctx.lineWidth = 2 * scaleFactor;
                 for (let i = 0; i < markers.length; i++) {
                     ctx.beginPath();
                     ctx.arc(markers[i].x, markers[i].y, markerRadius, 0, Math.PI * 2);
@@ -387,13 +442,12 @@
             }
         }
 
-        function drawGuideLines() {
-            ctx.strokeStyle = "rgba(255, 255, 0, 0.7)";
-            const lineWidth = 2 / (canvas.width / 600);
-            const crossSize = 15 / (canvas.width / 600);
-            ctx.lineWidth = lineWidth;
+        function drawGuideLines(scaleFactor) {
+            // 中心点（撮影後も基準が分かりやすいように小さなクロスを残す）
+            ctx.strokeStyle = "rgba(255, 0, 0, 0.9)";
+            ctx.lineWidth = 4 * scaleFactor;
+            const crossSize = 10 * scaleFactor;
             
-            // センタークロス
             ctx.beginPath();
             ctx.moveTo(centerX - crossSize, centerY);
             ctx.lineTo(centerX + crossSize, centerY);
@@ -401,55 +455,13 @@
             ctx.lineTo(centerX, centerY + crossSize);
             ctx.stroke();
             
-            // 基準木用の点線ガイド
+            // ★ガイドライン：赤色の太線（12時方向）
             if (radius === null) {
-                ctx.strokeStyle = "rgba(0, 255, 100, 0.8)";
-                ctx.setLineDash([10, 10]);
                 ctx.beginPath();
                 ctx.moveTo(centerX, centerY);
-                ctx.lineTo(centerX, 0);
+                ctx.lineTo(centerX, 0); // 真上へ実線を引く
                 ctx.stroke();
-                ctx.setLineDash([]); 
             }
-        }
-
-        function drawLevel() {
-            // 解像度に合わせて水準器のサイズを調整
-            const scaleFactor = canvas.width / 600; // 基準幅600pxに対する比率
-            const levelRadius = 50 * scaleFactor; 
-            const bubbleRadius = 12 * scaleFactor; 
-            
-            // 水準器の外枠
-            ctx.beginPath();
-            ctx.arc(centerX, centerY, levelRadius, 0, Math.PI * 2);
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
-            ctx.lineWidth = 2 * scaleFactor;
-            ctx.stroke();
-
-            // 端末の傾きから気泡の位置を計算
-            // 感度を少し調整（*3 -> *2.5）
-            let bubbleX = centerX + (tiltX * 2.5 * scaleFactor);
-            let bubbleY = centerY + (tiltY * 2.5 * scaleFactor); // ※カメラの向きによって符号の調整が必要な場合があります
-
-            // 気泡が枠外に出ないように制限
-            const dist = Math.sqrt(Math.pow(bubbleX - centerX, 2) + Math.pow(bubbleY - centerY, 2));
-            if (dist > levelRadius - bubbleRadius) {
-                const angle = Math.atan2(bubbleY - centerY, bubbleX - centerX);
-                bubbleX = centerX + Math.cos(angle) * (levelRadius - bubbleRadius);
-                bubbleY = centerY + Math.sin(angle) * (levelRadius - bubbleRadius);
-            }
-
-            // 気泡の描画
-            ctx.beginPath();
-            ctx.arc(bubbleX, bubbleY, bubbleRadius, 0, Math.PI * 2);
-            // 【修正点】水平判定の基準を緩める（判定距離を拡大）
-            // 以前は dist < 15 だったのを、枠の半径の半分程度まで許容するように変更
-            if (dist < levelRadius * 0.5) {
-                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; // OK（緑）
-            } else {
-                ctx.fillStyle = "rgba(255, 50, 50, 0.7)"; // NG（赤）
-            }
-            ctx.fill();
         }
     </script>
 </body>
