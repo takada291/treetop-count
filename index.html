@@ -12,6 +12,8 @@
             padding: 10px;
             background-color: #f0f4f8;
             color: #333;
+            /* スマートフォンでのスクロールバウンス防止 */
+            overscroll-behavior-y: none;
         }
         h2 { font-size: 1.2rem; margin-bottom: 5px; }
         
@@ -19,15 +21,21 @@
             position: relative;
             display: block;
             margin: 10px auto;
-            max-width: 100%;
+            /* 画面幅に合わせて正方形のコンテナを作る */
+            width: 100%;
+            max-width: 600px; /* PCなどで大きくなりすぎないように制限 */
+            aspect-ratio: 1 / 1; /* 常に正方形を維持 */
             background-color: #000;
-            /* 画面が潰れないように最小高さを設定 */
-            min-height: 300px; 
+            overflow: hidden;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         video {
             display: block;
             width: 100%;
-            height: auto;
+            height: 100%;
+            /* 正方形の枠からはみ出た部分をトリミングして中央寄せで表示 */
+            object-fit: cover; 
         }
         /* カメラ起動時はビデオの上に被せる */
         canvas.overlay {
@@ -36,6 +44,8 @@
             left: 0;
             width: 100%;
             height: 100%;
+            /* キャンバス自体の表示もコンテナに合わせて伸縮 */
+            object-fit: contain; 
             -webkit-tap-highlight-color: transparent;
         }
         /* 撮影後は通常のブロック要素に戻す */
@@ -43,11 +53,12 @@
             position: relative;
             display: block;
             width: 100%;
-            height: auto;
+            height: 100%;
+            object-fit: contain;
             -webkit-tap-highlight-color: transparent;
         }
         
-        .controls { margin-bottom: 10px; }
+        .controls { margin-bottom: 5px; }
         button {
             padding: 10px 15px;
             font-size: 1rem;
@@ -58,19 +69,29 @@
             color: white;
             cursor: pointer;
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            transition: background-color 0.2s;
         }
+        button:active { box-shadow: none; transform: translateY(2px); }
         button:disabled {
             background-color: #cbd5e0;
             cursor: not-allowed;
             box-shadow: none;
+            transform: none;
         }
         .action-btn { background-color: #e53e3e; font-weight: bold; }
+        .gps-btn { background-color: #d69e2e; }
         
         #status-msg {
             font-weight: bold;
             color: #c53030;
             margin: 5px 0;
             min-height: 1.5em;
+        }
+        #gps-display {
+            font-size: 0.9rem;
+            color: #4a5568;
+            margin-bottom: 5px;
+            min-height: 1.2em;
         }
         .result-box {
             background: #e2e8f0;
@@ -81,6 +102,7 @@
             width: 90%;
             max-width: 400px;
             margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         .highlight {
             font-size: 1.5rem;
@@ -91,7 +113,7 @@
 </head>
 <body>
 
-    <h2>樹頂密度 v0.2</h2>
+    <h2>樹頂密度 v0.3</h2>
     
     <div class="controls">
         <button id="cameraBtn">📷 カメラ＆センサー起動</button>
@@ -99,7 +121,11 @@
         <button id="undoBtn" disabled>1つ戻る</button>
         <button id="resetBtn">リセット</button>
     </div>
+    <div class="controls">
+        <button id="gpsBtn" class="gps-btn">📍 GPS取得</button>
+    </div>
 
+    <div id="gps-display">位置情報: 未取得</div>
     <div id="status-msg">1. カメラを起動してください</div>
 
     <div id="media-container">
@@ -121,7 +147,9 @@
         const captureBtn = document.getElementById('captureBtn');
         const undoBtn = document.getElementById('undoBtn');
         const resetBtn = document.getElementById('resetBtn');
+        const gpsBtn = document.getElementById('gpsBtn');
         const statusMsg = document.getElementById('status-msg');
+        const gpsDisplay = document.getElementById('gps-display');
         const countDisplay = document.getElementById('countDisplay');
         const densityDisplay = document.getElementById('densityDisplay');
 
@@ -136,6 +164,11 @@
         let centerY = 0;
         let radius = null; 
         let markers = [];  
+
+        // 正方形クリップ用の情報
+        let squareSize = 0;
+        let cropX = 0;
+        let cropY = 0;
         
         const bufferCanvas = document.createElement('canvas');
         const bufferCtx = bufferCanvas.getContext('2d');
@@ -145,6 +178,33 @@
             tiltX = e.gamma || 0; 
             tiltY = e.beta || 0;  
         }
+
+        // GPS取得処理
+        gpsBtn.addEventListener('click', function() {
+            if (!navigator.geolocation) {
+                gpsDisplay.textContent = "この端末はGPSに対応していません";
+                return;
+            }
+            gpsDisplay.textContent = "測位中...";
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    const lat = position.coords.latitude.toFixed(6);
+                    const lng = position.coords.longitude.toFixed(6);
+                    gpsDisplay.textContent = `📍 ${lat}, ${lng}`;
+                    gpsDisplay.style.color = "#276749";
+                },
+                (error) => {
+                    console.error("GPS取得エラー:", error);
+                    let errMsg = "GPS取得失敗";
+                    if (error.code === 1) errMsg += "(許可されませんでした)";
+                    else if (error.code === 2) errMsg += "(位置特定不可)";
+                    else if (error.code === 3) errMsg += "(タイムアウト)";
+                    gpsDisplay.textContent = `⚠️ ${errMsg}`;
+                    gpsDisplay.style.color = "#c53030";
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            );
+        });
 
         cameraBtn.addEventListener('click', async function() {
             // iOS向けのセンサー許可リクエスト
@@ -166,18 +226,32 @@
 
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment' }
+                    video: {
+                        facingMode: 'environment',
+                        // 可能であれば高解像度を要求
+                        width: { ideal: 1920 },
+                        height: { ideal: 1920 }
+                    }
                 });
                 video.srcObject = stream;
                 
                 video.onloadedmetadata = () => {
-                    // キャンバスのサイズを動画に合わせる
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    bufferCanvas.width = video.videoWidth;
-                    bufferCanvas.height = video.videoHeight;
-                    centerX = canvas.width / 2;
-                    centerY = canvas.height / 2;
+                    const vw = video.videoWidth;
+                    const vh = video.videoHeight;
+                    // 短い方の辺に合わせて正方形のサイズを決定
+                    squareSize = Math.min(vw, vh);
+                    // 中央を切り抜くための開始座標を計算
+                    cropX = (vw - squareSize) / 2;
+                    cropY = (vh - squareSize) / 2;
+
+                    // キャンバスの内部解像度を正方形に設定
+                    canvas.width = squareSize;
+                    canvas.height = squareSize;
+                    bufferCanvas.width = squareSize;
+                    bufferCanvas.height = squareSize;
+
+                    centerX = squareSize / 2;
+                    centerY = squareSize / 2;
                     
                     canvas.className = 'overlay'; // 重ねるモード
                     video.style.display = 'block';
@@ -199,15 +273,20 @@
         captureBtn.addEventListener('click', function() {
             if (appState !== 'CAMERA') return;
             
-            // ビデオフレームを裏キャンバスに描き込む
-            bufferCtx.drawImage(video, 0, 0, bufferCanvas.width, bufferCanvas.height);
+            // ビデオフレームの中央部分を正方形に切り抜いて裏キャンバスに描画
+            // drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+            bufferCtx.drawImage(
+                video, 
+                cropX, cropY, squareSize, squareSize, // ソースの切り抜き範囲
+                0, 0, squareSize, squareSize          // 描画先の範囲
+            );
             
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
             }
             
             video.style.display = 'none'; 
-            canvas.className = 'static'; // キャンバスをブロック要素にして画面潰れを防ぐ
+            canvas.className = 'static'; // キャンバスをブロック要素にする
             
             appState = 'SET_RADIUS';
             captureBtn.style.display = 'none';
@@ -218,9 +297,11 @@
         canvas.addEventListener('pointerdown', function(e) {
             if (appState === 'INIT' || appState === 'CAMERA') return;
 
+            // 画面上の表示サイズとキャンバスの内部解像度の比率を計算
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
+            // タップ座標を内部解像度の座標系に変換
             const x = (e.clientX - rect.left) * scaleX;
             const y = (e.clientY - rect.top) * scaleY;
 
@@ -265,32 +346,37 @@
         }
 
         function drawLoop() {
+            // 描画エリアをクリア
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             if (appState === 'CAMERA') {
                 drawGuideLines();
                 drawLevel();
             } else {
+                // 撮影した正方形画像を背景に描画
                 ctx.drawImage(bufferCanvas, 0, 0);
                 
                 if (radius === null) {
                     drawGuideLines(); 
                 } else {
+                    // 仮想円の描画
                     ctx.beginPath();
                     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
                     ctx.strokeStyle = "rgba(0, 255, 255, 0.8)";
-                    ctx.lineWidth = 3;
+                    ctx.lineWidth = 3 / (canvas.width / 600); // 解像度に応じて線の太さを調整
                     ctx.stroke();
                     ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
                     ctx.fill();
                 }
 
+                // マーカーの描画
+                const markerRadius = 8 / (canvas.width / 600); // 解像度に応じてマーカーサイズを調整
                 ctx.fillStyle = "red";
                 ctx.strokeStyle = "white";
-                ctx.lineWidth = 2;
+                ctx.lineWidth = 2 / (canvas.width / 600);
                 for (let i = 0; i < markers.length; i++) {
                     ctx.beginPath();
-                    ctx.arc(markers[i].x, markers[i].y, 8, 0, Math.PI * 2);
+                    ctx.arc(markers[i].x, markers[i].y, markerRadius, 0, Math.PI * 2);
                     ctx.fill();
                     ctx.stroke();
                 }
@@ -303,14 +389,19 @@
 
         function drawGuideLines() {
             ctx.strokeStyle = "rgba(255, 255, 0, 0.7)";
-            ctx.lineWidth = 2;
+            const lineWidth = 2 / (canvas.width / 600);
+            const crossSize = 15 / (canvas.width / 600);
+            ctx.lineWidth = lineWidth;
+            
+            // センタークロス
             ctx.beginPath();
-            ctx.moveTo(centerX - 15, centerY);
-            ctx.lineTo(centerX + 15, centerY);
-            ctx.moveTo(centerX, centerY - 15);
-            ctx.lineTo(centerX, centerY + 15);
+            ctx.moveTo(centerX - crossSize, centerY);
+            ctx.lineTo(centerX + crossSize, centerY);
+            ctx.moveTo(centerX, centerY - crossSize);
+            ctx.lineTo(centerX, centerY + crossSize);
             ctx.stroke();
             
+            // 基準木用の点線ガイド
             if (radius === null) {
                 ctx.strokeStyle = "rgba(0, 255, 100, 0.8)";
                 ctx.setLineDash([10, 10]);
@@ -323,19 +414,24 @@
         }
 
         function drawLevel() {
-            const levelRadius = 50; 
-            const bubbleRadius = 12; 
+            // 解像度に合わせて水準器のサイズを調整
+            const scaleFactor = canvas.width / 600; // 基準幅600pxに対する比率
+            const levelRadius = 50 * scaleFactor; 
+            const bubbleRadius = 12 * scaleFactor; 
             
+            // 水準器の外枠
             ctx.beginPath();
             ctx.arc(centerX, centerY, levelRadius, 0, Math.PI * 2);
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
-            ctx.lineWidth = 2;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+            ctx.lineWidth = 2 * scaleFactor;
             ctx.stroke();
 
-            // 端末を寝かせた状態での傾き調整
-            let bubbleX = centerX + (tiltX * 3);
-            let bubbleY = centerY + (tiltY * 3) - 30; // カメラの向きに応じた補正値（適宜調整してください）
+            // 端末の傾きから気泡の位置を計算
+            // 感度を少し調整（*3 -> *2.5）
+            let bubbleX = centerX + (tiltX * 2.5 * scaleFactor);
+            let bubbleY = centerY + (tiltY * 2.5 * scaleFactor); // ※カメラの向きによって符号の調整が必要な場合があります
 
+            // 気泡が枠外に出ないように制限
             const dist = Math.sqrt(Math.pow(bubbleX - centerX, 2) + Math.pow(bubbleY - centerY, 2));
             if (dist > levelRadius - bubbleRadius) {
                 const angle = Math.atan2(bubbleY - centerY, bubbleX - centerX);
@@ -343,12 +439,15 @@
                 bubbleY = centerY + Math.sin(angle) * (levelRadius - bubbleRadius);
             }
 
+            // 気泡の描画
             ctx.beginPath();
             ctx.arc(bubbleX, bubbleY, bubbleRadius, 0, Math.PI * 2);
-            if (dist < 15) {
-                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; 
+            // 【修正点】水平判定の基準を緩める（判定距離を拡大）
+            // 以前は dist < 15 だったのを、枠の半径の半分程度まで許容するように変更
+            if (dist < levelRadius * 0.5) {
+                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; // OK（緑）
             } else {
-                ctx.fillStyle = "rgba(255, 0, 0, 0.8)"; 
+                ctx.fillStyle = "rgba(255, 50, 50, 0.7)"; // NG（赤）
             }
             ctx.fill();
         }
