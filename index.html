@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>簡易立木密度カウンター V2</title>
+    <title>樹頂密度</title>
     <style>
         body {
             font-family: sans-serif;
@@ -15,25 +15,35 @@
         }
         h2 { font-size: 1.2rem; margin-bottom: 5px; }
         
-        /* カメラとキャンバスを重ねるためのコンテナ */
         #media-container {
             position: relative;
-            display: inline-block;
+            display: block;
             margin: 10px auto;
             max-width: 100%;
             background-color: #000;
+            /* 画面が潰れないように最小高さを設定 */
+            min-height: 300px; 
         }
         video {
             display: block;
-            max-width: 100%;
+            width: 100%;
             height: auto;
         }
-        canvas {
+        /* カメラ起動時はビデオの上に被せる */
+        canvas.overlay {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* 撮影後は通常のブロック要素に戻す */
+        canvas.static {
+            position: relative;
+            display: block;
+            width: 100%;
+            height: auto;
             -webkit-tap-highlight-color: transparent;
         }
         
@@ -54,7 +64,7 @@
             cursor: not-allowed;
             box-shadow: none;
         }
-        .action-btn { background-color: #e53e3e; font-weight: bold; } /* 撮影ボタン用 */
+        .action-btn { background-color: #e53e3e; font-weight: bold; }
         
         #status-msg {
             font-weight: bold;
@@ -81,10 +91,10 @@
 </head>
 <body>
 
-    <h2>簡易立木密度カウンター (100㎡)</h2>
+    <h2>樹頂密度 v0.2</h2>
     
     <div class="controls">
-        <button id="cameraBtn">📷 カメラ起動</button>
+        <button id="cameraBtn">📷 カメラ＆センサー起動</button>
         <button id="captureBtn" class="action-btn" style="display:none;">📸 撮影</button>
         <button id="undoBtn" disabled>1つ戻る</button>
         <button id="resetBtn">リセット</button>
@@ -94,7 +104,7 @@
 
     <div id="media-container">
         <video id="cameraVideo" autoplay playsinline muted></video>
-        <canvas id="mainCanvas"></canvas>
+        <canvas id="mainCanvas" class="overlay"></canvas>
     </div>
 
     <div class="result-box">
@@ -115,41 +125,53 @@
         const countDisplay = document.getElementById('countDisplay');
         const densityDisplay = document.getElementById('densityDisplay');
 
-        // 状態管理
-        let appState = 'INIT'; // INIT, CAMERA, SET_RADIUS, COUNTING
+        let appState = 'INIT'; 
         let stream = null;
         let animationId = null;
         
-        let tiltX = 0; // 水準器用 (gamma)
-        let tiltY = 0; // 水準器用 (beta)
+        let tiltX = 0; 
+        let tiltY = 0; 
         
         let centerX = 0;
         let centerY = 0;
         let radius = null; 
         let markers = [];  
         
-        // 撮影した静止画を保持する裏キャンバス
         const bufferCanvas = document.createElement('canvas');
         const bufferCtx = bufferCanvas.getContext('2d');
 
-        // --- 水準器（ジャイロセンサー）の取得 ---
-        window.addEventListener('deviceorientation', function(e) {
-            // スマホを真上に向けた状態を基準にするための簡易計算（縦持ち前提）
+        // センサーの値を取得する関数
+        function handleOrientation(e) {
             tiltX = e.gamma || 0; 
             tiltY = e.beta || 0;  
-        });
+        }
 
-        // --- カメラ起動 ---
         cameraBtn.addEventListener('click', async function() {
+            // iOS向けのセンサー許可リクエスト
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                    } else {
+                        alert('センサーの使用が拒否されました。水準器は動作しません。');
+                    }
+                } catch (error) {
+                    console.error(error);
+                }
+            } else {
+                // Android等、明示的な許可が不要な場合
+                window.addEventListener('deviceorientation', handleOrientation);
+            }
+
             try {
-                // 背面カメラ（超広角がある場合は自動選択されることが多いです）
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: 'environment' }
                 });
                 video.srcObject = stream;
                 
-                // 動画のメタデータが読み込まれたらキャンバスサイズを合わせる
                 video.onloadedmetadata = () => {
+                    // キャンバスのサイズを動画に合わせる
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     bufferCanvas.width = video.videoWidth;
@@ -157,33 +179,35 @@
                     centerX = canvas.width / 2;
                     centerY = canvas.height / 2;
                     
+                    canvas.className = 'overlay'; // 重ねるモード
+                    video.style.display = 'block';
+                    
                     appState = 'CAMERA';
                     cameraBtn.style.display = 'none';
                     captureBtn.style.display = 'inline-block';
                     statusMsg.textContent = "水準器の円を合わせ、ガイドラインに基準木を置いて撮影";
                     statusMsg.style.color = "#276749";
                     
-                    // リアルタイム描画ループ開始
                     drawLoop();
                 };
             } catch (err) {
-                console.error("カメラの起動に失敗しました:", err);
-                alert("カメラの起動に失敗しました。HTTPS環境、またはブラウザの権限設定を確認してください。");
+                console.error("カメラの起動に失敗:", err);
+                alert("カメラの起動に失敗しました。HTTPS環境であることを確認してください。");
             }
         });
 
-        // --- 撮影ボタン ---
         captureBtn.addEventListener('click', function() {
             if (appState !== 'CAMERA') return;
             
-            // 現在のビデオフレームを裏キャンバスに保存
+            // ビデオフレームを裏キャンバスに描き込む
             bufferCtx.drawImage(video, 0, 0, bufferCanvas.width, bufferCanvas.height);
             
-            // カメラを停止
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
             }
-            video.style.display = 'none'; // ビデオ要素を隠す
+            
+            video.style.display = 'none'; 
+            canvas.className = 'static'; // キャンバスをブロック要素にして画面潰れを防ぐ
             
             appState = 'SET_RADIUS';
             captureBtn.style.display = 'none';
@@ -191,7 +215,6 @@
             statusMsg.style.color = "#2b6cb0";
         });
 
-        // --- キャンバスのタップ処理 ---
         canvas.addEventListener('pointerdown', function(e) {
             if (appState === 'INIT' || appState === 'CAMERA') return;
 
@@ -216,7 +239,6 @@
             updateResults();
         });
 
-        // --- 1つ戻る ---
         undoBtn.addEventListener('click', function() {
             if (markers.length > 0) {
                 markers.pop();
@@ -232,22 +254,8 @@
             updateResults();
         });
 
-        // --- リセット（カメラモードに戻る） ---
         resetBtn.addEventListener('click', function() {
-            radius = null;
-            markers = [];
-            undoBtn.disabled = true;
-            updateResults();
-            
-            video.style.display = 'block';
-            captureBtn.style.display = 'none';
-            cameraBtn.style.display = 'inline-block';
-            statusMsg.textContent = "1. カメラを起動してください";
-            statusMsg.style.color = "#c53030";
-            
-            appState = 'INIT';
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            cancelAnimationFrame(animationId);
+            location.reload(); // 一番確実なリセット（画面再読み込み）
         });
 
         function updateResults() {
@@ -256,21 +264,18 @@
             densityDisplay.textContent = count * 100;
         }
 
-        // --- 描画ループ ---
         function drawLoop() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             if (appState === 'CAMERA') {
-                // カメラモード：ガイドラインと水準器を描画
                 drawGuideLines();
                 drawLevel();
             } else {
-                // 撮影後：静止画を描画
                 ctx.drawImage(bufferCanvas, 0, 0);
-                drawGuideLines(); // 基準木設定前はガイドを表示
                 
-                // 仮想円の描画
-                if (radius !== null) {
+                if (radius === null) {
+                    drawGuideLines(); 
+                } else {
                     ctx.beginPath();
                     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
                     ctx.strokeStyle = "rgba(0, 255, 255, 0.8)";
@@ -280,7 +285,6 @@
                     ctx.fill();
                 }
 
-                // タップマーカーの描画
                 ctx.fillStyle = "red";
                 ctx.strokeStyle = "white";
                 ctx.lineWidth = 2;
@@ -297,12 +301,9 @@
             }
         }
 
-        // --- ガイドラインの描画 ---
         function drawGuideLines() {
             ctx.strokeStyle = "rgba(255, 255, 0, 0.7)";
             ctx.lineWidth = 2;
-            
-            // センタークロス
             ctx.beginPath();
             ctx.moveTo(centerX - 15, centerY);
             ctx.lineTo(centerX + 15, centerY);
@@ -310,7 +311,6 @@
             ctx.lineTo(centerX, centerY + 15);
             ctx.stroke();
             
-            // 12時方向の点線ガイド（基準木用）
             if (radius === null) {
                 ctx.strokeStyle = "rgba(0, 255, 100, 0.8)";
                 ctx.setLineDash([10, 10]);
@@ -322,25 +322,20 @@
             }
         }
 
-        // --- 水準器（気泡）の描画 ---
         function drawLevel() {
-            const levelRadius = 40; // 水準器の枠の大きさ
-            const bubbleRadius = 10; // 気泡の大きさ
+            const levelRadius = 50; 
+            const bubbleRadius = 12; 
             
-            // 枠の描画
             ctx.beginPath();
             ctx.arc(centerX, centerY, levelRadius, 0, Math.PI * 2);
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
             ctx.lineWidth = 2;
             ctx.stroke();
 
-            // 傾きをピクセル座標に変換（係数で感度調整）
-            // 真上を向いている時、beta=0(または180/-180), gamma=0 に近くなります
-            // ※端末によって基準値が異なる場合があるため、簡易的なマッピングです
-            let bubbleX = centerX + (tiltX * 2);
-            let bubbleY = centerY + (tiltY * 2);
+            // 端末を寝かせた状態での傾き調整
+            let bubbleX = centerX + (tiltX * 3);
+            let bubbleY = centerY + (tiltY * 3) - 30; // カメラの向きに応じた補正値（適宜調整してください）
 
-            // 枠からはみ出ないように制限
             const dist = Math.sqrt(Math.pow(bubbleX - centerX, 2) + Math.pow(bubbleY - centerY, 2));
             if (dist > levelRadius - bubbleRadius) {
                 const angle = Math.atan2(bubbleY - centerY, bubbleX - centerX);
@@ -348,14 +343,12 @@
                 bubbleY = centerY + Math.sin(angle) * (levelRadius - bubbleRadius);
             }
 
-            // 気泡の描画
             ctx.beginPath();
             ctx.arc(bubbleX, bubbleY, bubbleRadius, 0, Math.PI * 2);
-            // 中心に近い（水平）ほど緑色、ズレるほど赤色に変化
-            if (dist < 10) {
-                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; // 水平！
+            if (dist < 15) {
+                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; 
             } else {
-                ctx.fillStyle = "rgba(255, 0, 0, 0.6)"; // 傾いている
+                ctx.fillStyle = "rgba(255, 0, 0, 0.8)"; 
             }
             ctx.fill();
         }
