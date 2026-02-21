@@ -1,4 +1,4 @@
-const CACHE_NAME = 'treetop-count-v1';
+const CACHE_NAME = 'treetop-count-v0.5.0';
 
 // キャッシュするファイルのリスト
 const urlsToCache = [
@@ -47,4 +47,5 @@ self.addEventListener('activate', event => {
       );
     })
   );
+
 });
