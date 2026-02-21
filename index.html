@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>簡易立木密度カウンター</title>
+    <title>簡易立木密度カウンター V2</title>
     <style>
         body {
             font-family: sans-serif;
@@ -14,19 +14,29 @@
             color: #333;
         }
         h2 { font-size: 1.2rem; margin-bottom: 5px; }
-        #canvas-container {
+        
+        /* カメラとキャンバスを重ねるためのコンテナ */
+        #media-container {
             position: relative;
             display: inline-block;
-            margin: 10px 0;
+            margin: 10px auto;
             max-width: 100%;
+            background-color: #000;
         }
-        canvas {
-            border: 2px solid #5a5a5a;
-            background-color: #fff;
+        video {
+            display: block;
             max-width: 100%;
             height: auto;
-            -webkit-tap-highlight-color: transparent; 
         }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
         .controls { margin-bottom: 10px; }
         button {
             padding: 10px 15px;
@@ -44,20 +54,13 @@
             cursor: not-allowed;
             box-shadow: none;
         }
-        .gps-btn {
-            background-color: #d69e2e; /* GPSボタンは少し色を変える */
-        }
+        .action-btn { background-color: #e53e3e; font-weight: bold; } /* 撮影ボタン用 */
+        
         #status-msg {
             font-weight: bold;
             color: #c53030;
             margin: 5px 0;
             min-height: 1.5em;
-        }
-        #gps-display {
-            font-size: 0.9rem;
-            color: #4a5568;
-            margin-bottom: 10px;
-            min-height: 1.2em;
         }
         .result-box {
             background: #e2e8f0;
@@ -81,17 +84,17 @@
     <h2>簡易立木密度カウンター (100㎡)</h2>
     
     <div class="controls">
-        <input type="file" id="imageLoader" accept="image/*" capture="environment" style="margin-bottom: 10px;"><br>
+        <button id="cameraBtn">📷 カメラ起動</button>
+        <button id="captureBtn" class="action-btn" style="display:none;">📸 撮影</button>
         <button id="undoBtn" disabled>1つ戻る</button>
         <button id="resetBtn">リセット</button>
-        <button id="gpsBtn" class="gps-btn">📍 GPS取得</button>
     </div>
 
-    <div id="gps-display">位置情報: 未取得</div>
-    <div id="status-msg">1. 写真を読み込んでください</div>
+    <div id="status-msg">1. カメラを起動してください</div>
 
-    <div id="canvas-container">
-        <canvas id="mainCanvas" width="600" height="800"></canvas>
+    <div id="media-container">
+        <video id="cameraVideo" autoplay playsinline muted></video>
+        <canvas id="mainCanvas"></canvas>
     </div>
 
     <div class="result-box">
@@ -100,63 +103,97 @@
     </div>
 
     <script>
+        const video = document.getElementById('cameraVideo');
         const canvas = document.getElementById('mainCanvas');
         const ctx = canvas.getContext('2d');
-        const imageLoader = document.getElementById('imageLoader');
+        
+        const cameraBtn = document.getElementById('cameraBtn');
+        const captureBtn = document.getElementById('captureBtn');
         const undoBtn = document.getElementById('undoBtn');
         const resetBtn = document.getElementById('resetBtn');
-        const gpsBtn = document.getElementById('gpsBtn');
         const statusMsg = document.getElementById('status-msg');
-        const gpsDisplay = document.getElementById('gps-display');
         const countDisplay = document.getElementById('countDisplay');
         const densityDisplay = document.getElementById('densityDisplay');
 
-        let img = new Image();
-        let imageLoaded = false;
-        
         // 状態管理
+        let appState = 'INIT'; // INIT, CAMERA, SET_RADIUS, COUNTING
+        let stream = null;
+        let animationId = null;
+        
+        let tiltX = 0; // 水準器用 (gamma)
+        let tiltY = 0; // 水準器用 (beta)
+        
         let centerX = 0;
         let centerY = 0;
         let radius = null; 
         let markers = [];  
+        
+        // 撮影した静止画を保持する裏キャンバス
+        const bufferCanvas = document.createElement('canvas');
+        const bufferCtx = bufferCanvas.getContext('2d');
 
-        // 写真の読み込み処理
-        imageLoader.addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            const reader = new FileReader();
-            reader.onload = function(event) {
-                img.onload = function() {
-                    const MAX_WIDTH = 1000;
-                    let width = img.width;
-                    let height = img.height;
-
-                    if (width > MAX_WIDTH) {
-                        height = Math.round((height * MAX_WIDTH) / width);
-                        width = MAX_WIDTH;
-                    }
-
-                    canvas.width = width;
-                    canvas.height = height;
-                    
-                    centerX = width / 2;
-                    centerY = height / 2;
-                    
-                    resetState();
-                    imageLoaded = true;
-                    statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
-                    statusMsg.style.color = "#2b6cb0";
-                    redraw();
-                }
-                img.src = event.target.result;
-            }
-            reader.readAsDataURL(file);
+        // --- 水準器（ジャイロセンサー）の取得 ---
+        window.addEventListener('deviceorientation', function(e) {
+            // スマホを真上に向けた状態を基準にするための簡易計算（縦持ち前提）
+            tiltX = e.gamma || 0; 
+            tiltY = e.beta || 0;  
         });
 
-        // キャンバスのタップ処理
+        // --- カメラ起動 ---
+        cameraBtn.addEventListener('click', async function() {
+            try {
+                // 背面カメラ（超広角がある場合は自動選択されることが多いです）
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' }
+                });
+                video.srcObject = stream;
+                
+                // 動画のメタデータが読み込まれたらキャンバスサイズを合わせる
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    bufferCanvas.width = video.videoWidth;
+                    bufferCanvas.height = video.videoHeight;
+                    centerX = canvas.width / 2;
+                    centerY = canvas.height / 2;
+                    
+                    appState = 'CAMERA';
+                    cameraBtn.style.display = 'none';
+                    captureBtn.style.display = 'inline-block';
+                    statusMsg.textContent = "水準器の円を合わせ、ガイドラインに基準木を置いて撮影";
+                    statusMsg.style.color = "#276749";
+                    
+                    // リアルタイム描画ループ開始
+                    drawLoop();
+                };
+            } catch (err) {
+                console.error("カメラの起動に失敗しました:", err);
+                alert("カメラの起動に失敗しました。HTTPS環境、またはブラウザの権限設定を確認してください。");
+            }
+        });
+
+        // --- 撮影ボタン ---
+        captureBtn.addEventListener('click', function() {
+            if (appState !== 'CAMERA') return;
+            
+            // 現在のビデオフレームを裏キャンバスに保存
+            bufferCtx.drawImage(video, 0, 0, bufferCanvas.width, bufferCanvas.height);
+            
+            // カメラを停止
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            video.style.display = 'none'; // ビデオ要素を隠す
+            
+            appState = 'SET_RADIUS';
+            captureBtn.style.display = 'none';
+            statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
+            statusMsg.style.color = "#2b6cb0";
+        });
+
+        // --- キャンバスのタップ処理 ---
         canvas.addEventListener('pointerdown', function(e) {
-            if (!imageLoaded) return;
+            if (appState === 'INIT' || appState === 'CAMERA') return;
 
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
@@ -164,50 +201,28 @@
             const x = (e.clientX - rect.left) * scaleX;
             const y = (e.clientY - rect.top) * scaleY;
 
-            if (radius === null) {
+            if (appState === 'SET_RADIUS') {
                 const dx = x - centerX;
                 const dy = y - centerY;
                 radius = Math.sqrt(dx * dx + dy * dy);
                 
+                appState = 'COUNTING';
                 statusMsg.textContent = "3. 円内の他の木の樹頂点をタップしてカウント";
                 statusMsg.style.color = "#276749";
                 undoBtn.disabled = false;
-            } else {
+            } else if (appState === 'COUNTING') {
                 markers.push({x: x, y: y});
             }
-            
             updateResults();
-            redraw();
         });
 
-        // GPS取得処理
-        gpsBtn.addEventListener('click', function() {
-            if (!navigator.geolocation) {
-                gpsDisplay.textContent = "このブラウザはGPSをサポートしていません";
-                return;
-            }
-            
-            gpsDisplay.textContent = "位置情報を取得中...";
-            
-            navigator.geolocation.getCurrentPosition(
-                function(position) {
-                    const lat = position.coords.latitude.toFixed(6);
-                    const lng = position.coords.longitude.toFixed(6);
-                    gpsDisplay.textContent = `📍 緯度: ${lat}, 経度: ${lng}`;
-                },
-                function(error) {
-                    gpsDisplay.textContent = "⚠️ 位置情報の取得に失敗しました";
-                    console.error("GPS Error: ", error);
-                },
-                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-            );
-        });
-
+        // --- 1つ戻る ---
         undoBtn.addEventListener('click', function() {
             if (markers.length > 0) {
                 markers.pop();
             } else if (radius !== null) {
                 radius = null;
+                appState = 'SET_RADIUS';
                 statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
                 statusMsg.style.color = "#2b6cb0";
             }
@@ -215,24 +230,25 @@
                 undoBtn.disabled = true;
             }
             updateResults();
-            redraw();
         });
 
+        // --- リセット（カメラモードに戻る） ---
         resetBtn.addEventListener('click', function() {
-            resetState();
-            redraw();
-            if(imageLoaded){
-                statusMsg.textContent = "2. 画面上部のガイド線上で基準木をタップ";
-                statusMsg.style.color = "#2b6cb0";
-            }
-        });
-
-        function resetState() {
             radius = null;
             markers = [];
             undoBtn.disabled = true;
             updateResults();
-        }
+            
+            video.style.display = 'block';
+            captureBtn.style.display = 'none';
+            cameraBtn.style.display = 'inline-block';
+            statusMsg.textContent = "1. カメラを起動してください";
+            statusMsg.style.color = "#c53030";
+            
+            appState = 'INIT';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            cancelAnimationFrame(animationId);
+        });
 
         function updateResults() {
             const count = markers.length;
@@ -240,64 +256,108 @@
             densityDisplay.textContent = count * 100;
         }
 
-        function redraw() {
+        // --- 描画ループ ---
+        function drawLoop() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            if (imageLoaded) {
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            }
-
-            if (imageLoaded) {
-                ctx.strokeStyle = "rgba(255, 255, 0, 0.7)";
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(centerX - 10, centerY);
-                ctx.lineTo(centerX + 10, centerY);
-                ctx.moveTo(centerX, centerY - 10);
-                ctx.lineTo(centerX, centerY + 10);
-                ctx.stroke();
+            if (appState === 'CAMERA') {
+                // カメラモード：ガイドラインと水準器を描画
+                drawGuideLines();
+                drawLevel();
+            } else {
+                // 撮影後：静止画を描画
+                ctx.drawImage(bufferCanvas, 0, 0);
+                drawGuideLines(); // 基準木設定前はガイドを表示
                 
-                // --- 追加：基準木設定用のガイドライン（12時の方向） ---
-                if (radius === null) {
-                    ctx.strokeStyle = "rgba(0, 255, 100, 0.8)"; // 明るい緑
-                    ctx.setLineDash([10, 10]); // 点線
-                    ctx.lineWidth = 2;
+                // 仮想円の描画
+                if (radius !== null) {
                     ctx.beginPath();
-                    ctx.moveTo(centerX, centerY);
-                    ctx.lineTo(centerX, 0); // 真上へ
+                    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+                    ctx.strokeStyle = "rgba(0, 255, 255, 0.8)";
+                    ctx.lineWidth = 3;
                     ctx.stroke();
-                    ctx.setLineDash([]); // 点線をリセット
-                    
-                    // ガイドテキスト
-                    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-                    ctx.fillRect(centerX - 120, 20, 240, 30);
-                    ctx.fillStyle = "white";
-                    ctx.font = "16px sans-serif";
-                    ctx.textAlign = "center";
-                    ctx.textBaseline = "middle";
-                    ctx.fillText("↑ このライン上に基準木を配置", centerX, 35);
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
+                    ctx.fill();
+                }
+
+                // タップマーカーの描画
+                ctx.fillStyle = "red";
+                ctx.strokeStyle = "white";
+                ctx.lineWidth = 2;
+                for (let i = 0; i < markers.length; i++) {
+                    ctx.beginPath();
+                    ctx.arc(markers[i].x, markers[i].y, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
                 }
             }
 
-            if (radius !== null) {
+            if (appState !== 'INIT') {
+                animationId = requestAnimationFrame(drawLoop);
+            }
+        }
+
+        // --- ガイドラインの描画 ---
+        function drawGuideLines() {
+            ctx.strokeStyle = "rgba(255, 255, 0, 0.7)";
+            ctx.lineWidth = 2;
+            
+            // センタークロス
+            ctx.beginPath();
+            ctx.moveTo(centerX - 15, centerY);
+            ctx.lineTo(centerX + 15, centerY);
+            ctx.moveTo(centerX, centerY - 15);
+            ctx.lineTo(centerX, centerY + 15);
+            ctx.stroke();
+            
+            // 12時方向の点線ガイド（基準木用）
+            if (radius === null) {
+                ctx.strokeStyle = "rgba(0, 255, 100, 0.8)";
+                ctx.setLineDash([10, 10]);
                 ctx.beginPath();
-                ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-                ctx.strokeStyle = "rgba(0, 255, 255, 0.8)";
-                ctx.lineWidth = 3;
+                ctx.moveTo(centerX, centerY);
+                ctx.lineTo(centerX, 0);
                 ctx.stroke();
-                ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
-                ctx.fill();
+                ctx.setLineDash([]); 
+            }
+        }
+
+        // --- 水準器（気泡）の描画 ---
+        function drawLevel() {
+            const levelRadius = 40; // 水準器の枠の大きさ
+            const bubbleRadius = 10; // 気泡の大きさ
+            
+            // 枠の描画
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, levelRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 傾きをピクセル座標に変換（係数で感度調整）
+            // 真上を向いている時、beta=0(または180/-180), gamma=0 に近くなります
+            // ※端末によって基準値が異なる場合があるため、簡易的なマッピングです
+            let bubbleX = centerX + (tiltX * 2);
+            let bubbleY = centerY + (tiltY * 2);
+
+            // 枠からはみ出ないように制限
+            const dist = Math.sqrt(Math.pow(bubbleX - centerX, 2) + Math.pow(bubbleY - centerY, 2));
+            if (dist > levelRadius - bubbleRadius) {
+                const angle = Math.atan2(bubbleY - centerY, bubbleX - centerX);
+                bubbleX = centerX + Math.cos(angle) * (levelRadius - bubbleRadius);
+                bubbleY = centerY + Math.sin(angle) * (levelRadius - bubbleRadius);
             }
 
-            ctx.fillStyle = "red";
-            ctx.strokeStyle = "white";
-            ctx.lineWidth = 2;
-            for (let i = 0; i < markers.length; i++) {
-                ctx.beginPath();
-                ctx.arc(markers[i].x, markers[i].y, 8, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.stroke();
+            // 気泡の描画
+            ctx.beginPath();
+            ctx.arc(bubbleX, bubbleY, bubbleRadius, 0, Math.PI * 2);
+            // 中心に近い（水平）ほど緑色、ズレるほど赤色に変化
+            if (dist < 10) {
+                ctx.fillStyle = "rgba(0, 255, 0, 0.8)"; // 水平！
+            } else {
+                ctx.fillStyle = "rgba(255, 0, 0, 0.6)"; // 傾いている
             }
+            ctx.fill();
         }
     </script>
 </body>
