@@ -1,6 +1,5 @@
-const CACHE_NAME = 'treetop-count-v0.5.0';
+const CACHE_NAME = 'treetop-count-v0.6.0'; // バージョンを少し上げます
 
-// キャッシュするファイルのリスト
 const urlsToCache = [
   './',
   './index.html',
@@ -9,8 +8,10 @@ const urlsToCache = [
   './icon-512.png'
 ];
 
-// インストール時の処理：ファイルをキャッシュに保存
 self.addEventListener('install', event => {
+  // ★追加：新しいサービスワーカーを即座にアクティブにする
+  self.skipWaiting();
+  
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => {
@@ -19,12 +20,10 @@ self.addEventListener('install', event => {
   );
 });
 
-// フェッチ時の処理：ネットワークが繋がらない時はキャッシュから返す
 self.addEventListener('fetch', event => {
   event.respondWith(
     caches.match(event.request)
       .then(response => {
-        // キャッシュ内に該当ファイルがあればそれを返す
         if (response) {
           return response;
         }
@@ -33,7 +32,6 @@ self.addEventListener('fetch', event => {
   );
 });
 
-// アクティベート時の処理：古いバージョンのキャッシュを削除
 self.addEventListener('activate', event => {
   const cacheWhitelist = [CACHE_NAME];
   event.waitUntil(
@@ -45,7 +43,9 @@ self.addEventListener('activate', event => {
           }
         })
       );
+    }).then(() => {
+      // ★追加：新しいサービスワーカーにすぐコントロールを奪わせる
+      return self.clients.claim();
     })
   );
-
 });
